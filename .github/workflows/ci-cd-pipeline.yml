@@ -1,0 +1,65 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v2
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v1
+      
+      - name: 
+        uses: azure/docker-login@v2
+        with:
+          login-server: ${{ secrets.LOGIN_SERVER }} # default: index.docker.io
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v2
+        with:
+          context: ./docker/api
+          push: true
+          tags: user/my-api:latest
+
+      - name: Azure Login
+        uses: azure/login@v1
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Terraform Init
+        run: terraform init
+        working-directory: ./terraform/environments/dev
+
+      - name: Terraform Apply
+        env:
+          TF_VAR_DB_USERNAME: ${{ secrets.DB_USERNAME }}
+          TF_VAR_DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
+        run: terraform apply -auto-approve
+        working-directory: ./terraform/environments/dev
+      
+      - name: Set up kubectl
+        uses: azure/setup-kubectl@v1
+
+      - name: Configure kubectl with kubeconfig
+        run: |
+          echo "${{ steps.terraform.outputs.kubeconfig }}" > kubeconfig
+          export KUBECONFIG=kubeconfig
+
+      - name: Create Kubernetes Secret
+        env:
+          DB_USERNAME: ${{ secrets.DB_USERNAME }}
+          DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
+        run: kubectl create secret generic db-secret --from-literal=db-username=$DB_USERNAME --from-literal=db-password=$DB_PASSWORD --dry-run=client -o yaml 
+
+      - name: Deploy with Helm
+        env: ${{ steps.terraform_output.outputs.server_fqdn }}
+        run: helm upgrade --install api ./helm/api
